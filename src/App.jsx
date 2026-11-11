@@ -8,6 +8,7 @@ import {
   MessageCircle, Download, Printer, TrendingUp, TrendingDown,
   Building2, Award, FileCheck2, QrCode, CheckCheck, Receipt, Trash2, FileText
 } from 'lucide-react';
+import { Analytics } from "@vercel/analytics/react"
 
 export default function App() {
   // Core Data State
