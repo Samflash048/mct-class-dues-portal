@@ -2442,6 +2442,7 @@ export default function App() {
           </form>
         </div>
       )}
+      <Analytics />
     </div>
   );
 }
