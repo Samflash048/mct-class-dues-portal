@@ -5,7 +5,8 @@ import {
   Search, Lock, CheckCircle2, AlertCircle, Clock,
   Upload, Plus, Save, LogOut, Wallet, Users, FileSpreadsheet,
   ChevronRight, X, ShieldCheck, DollarSign, Copy, Check,
-  MessageCircle, Download, Printer, TrendingUp, Building2, Award, FileCheck2, QrCode
+  MessageCircle, Download, Printer, TrendingUp, TrendingDown,
+  Building2, Award, FileCheck2, QrCode, CheckCheck, Receipt, Trash2, FileText
 } from 'lucide-react';
 
 export default function App() {
@@ -13,6 +14,7 @@ export default function App() {
   const [students, setStudents] = useState([]);
   const [categories, setCategories] = useState([]);
   const [payments, setPayments] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [settings, setSettings] = useState({
     bank_name: 'OPay',
     account_number: '0000000000',
@@ -28,6 +30,7 @@ export default function App() {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [copiedAccount, setCopiedAccount] = useState(false);
   const [showClearanceSlip, setShowClearanceSlip] = useState(false);
+  const [showAuditReport, setShowAuditReport] = useState(false);
   const [verifiedViaQr, setVerifiedViaQr] = useState(false);
 
   // Admin & Auth State
@@ -37,15 +40,28 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  const [adminTab, setAdminTab] = useState('matrix'); // 'matrix' | 'fees' | 'students'
+  const [adminTab, setAdminTab] = useState('matrix'); // 'matrix' | 'expenses' | 'fees' | 'students'
 
-  // Admin Editing State
+  // Admin Editing & Batch State
   const [matrixSearch, setMatrixSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'cleared' | 'owing'
   const [editingCell, setEditingCell] = useState(null);
   const [customAmount, setCustomAmount] = useState('');
   const [savingCell, setSavingCell] = useState(false);
+  const [batchLoadingId, setBatchLoadingId] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
+
+  // New Expense State
+  const [newExpense, setNewExpense] = useState({
+    title: '',
+    category: 'Academic / Printing',
+    session: '400L (2025/2026)',
+    amount: '',
+    spent_date: new Date().toISOString().slice(0, 10),
+    authorized_by: 'FinSec / Exco',
+    notes: ''
+  });
+  const [savingExpense, setSavingExpense] = useState(false);
 
   // New Levy / Student State
   const [newCategory, setNewCategory] = useState({
@@ -74,17 +90,19 @@ export default function App() {
 
   async function fetchAllData() {
     setLoading(true);
-    const [stuRes, catRes, payRes, setRes] = await Promise.all([
+    const [stuRes, catRes, payRes, setRes, expRes] = await Promise.all([
       supabase.from('students').select('*').order('full_name', { ascending: true }),
       supabase.from('fee_categories').select('*').order('display_order', { ascending: true }),
       supabase.from('payments').select('*'),
-      supabase.from('portal_settings').select('*').eq('id', 1).maybeSingle()
+      supabase.from('portal_settings').select('*').eq('id', 1).maybeSingle(),
+      supabase.from('expenses').select('*').order('spent_date', { ascending: false })
     ]);
 
     const loadedStudents = stuRes.data || [];
     if (stuRes.data) setStudents(loadedStudents);
     if (catRes.data) setCategories(catRes.data);
     if (payRes.data) setPayments(payRes.data);
+    if (expRes.data) setExpenses(expRes.data);
     if (setRes.data) {
       setSettings((prev) => ({ ...prev, ...setRes.data }));
     }
@@ -170,7 +188,7 @@ export default function App() {
 
   // Build Verification Deep-Link URL & QR Image Source
   function getVerificationData(student) {
-    if (!student) return { verifyUrl: '', qrImageUrl: '' };
+    if (!student) return { verifyUrl: '', qrImageUrl: '', refCode: '' };
     const refCode = getClearanceRef(student);
     const baseUrl = window.location.origin;
     const verifyUrl = `${baseUrl}/?verify=${encodeURIComponent(student.reg_number)}&ref=${encodeURIComponent(refCode)}`;
@@ -178,7 +196,7 @@ export default function App() {
     return { verifyUrl, qrImageUrl, refCode };
   }
 
-  // Revenue Analytics Computation
+  // Revenue & Expense Treasury Computation
   const analytics = useMemo(() => {
     const studentCount = students.length;
     let grandCollected = 0;
@@ -207,12 +225,22 @@ export default function App() {
       return { ...cat, collected, expected, clearedCount, partialCount, rate };
     });
 
+    const totalExpenses = expenses.reduce((sum, exp) => sum + (Number(exp.amount) || 0), 0);
+    const netBalance = grandCollected - totalExpenses;
     const grandOutstanding = Math.max(0, grandExpected - grandCollected);
     const overallRate =
       grandExpected > 0 ? Math.min(100, Math.round((grandCollected / grandExpected) * 100)) : 0;
 
-    return { grandCollected, grandExpected, grandOutstanding, overallRate, perCategory };
-  }, [categories, students, paymentMap]);
+    return {
+      grandCollected,
+      grandExpected,
+      totalExpenses,
+      netBalance,
+      grandOutstanding,
+      overallRate,
+      perCategory
+    };
+  }, [categories, students, paymentMap, expenses]);
 
   // Filter Students for Public Search
   const filteredStudents = useMemo(() => {
@@ -316,6 +344,36 @@ export default function App() {
     document.body.removeChild(link);
   }
 
+  function handleExportExpensesCsv() {
+    if (expenses.length === 0) {
+      alert('No expenses recorded yet.');
+      return;
+    }
+    const exportRows = expenses.map((exp, idx) => ({
+      'S/N': idx + 1,
+      Date: exp.spent_date,
+      Title: exp.title,
+      Category: exp.category,
+      Session: exp.session,
+      'Amount (NGN)': exp.amount,
+      'Authorized By': exp.authorized_by,
+      Notes: exp.notes || ''
+    }));
+
+    const csv = Papa.unparse(exportRows);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute(
+      'download',
+      `Class_Expenses_Report_${new Date().toISOString().slice(0, 10)}.csv`
+    );
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   async function handleAdminLogin(e) {
     e.preventDefault();
     setAuthError('');
@@ -358,6 +416,88 @@ export default function App() {
       alert('Error saving payment: ' + error.message);
     }
     setSavingCell(false);
+  }
+
+  async function handleBatchMarkCleared(category) {
+    const targetAmount = Number(category.target_amount) || 0;
+    if (targetAmount <= 0) {
+      alert(
+        `Please set a price greater than ₦0 for "${category.title}" in the "Prices, Levies & Settings" tab before marking everyone paid.`
+      );
+      return;
+    }
+
+    if (students.length === 0) {
+      alert('No students found. Please upload your Master Class List first.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Mark ALL ${students.length} classmates as CLEARED (₦${targetAmount.toLocaleString()} paid) for ${category.title} (${category.session})?\n\nYou can still click any student's cell afterward to edit their record individually.`
+    );
+    if (!confirmed) return;
+
+    setBatchLoadingId(category.id);
+    const nowIso = new Date().toISOString();
+
+    const payload = students.map((stu) => ({
+      student_id: stu.id,
+      category_id: category.id,
+      amount_paid: targetAmount,
+      updated_at: nowIso
+    }));
+
+    const { error } = await supabase
+      .from('payments')
+      .upsert(payload, { onConflict: 'student_id,category_id' });
+
+    if (error) {
+      alert('Batch update error: ' + error.message);
+    } else {
+      await fetchAllData();
+    }
+    setBatchLoadingId(null);
+  }
+
+  async function handleAddExpense(e) {
+    e.preventDefault();
+    if (!newExpense.title || !newExpense.amount) return;
+    setSavingExpense(true);
+
+    const { error } = await supabase.from('expenses').insert([
+      {
+        title: newExpense.title.trim(),
+        category: newExpense.category,
+        session: newExpense.session,
+        amount: Math.max(0, Number(newExpense.amount) || 0),
+        spent_date: newExpense.spent_date,
+        authorized_by: newExpense.authorized_by.trim() || 'FinSec',
+        notes: newExpense.notes.trim()
+      }
+    ]);
+
+    if (error) {
+      alert('Error logging expense: ' + error.message);
+    } else {
+      setNewExpense({
+        title: '',
+        category: 'Academic / Printing',
+        session: '400L (2025/2026)',
+        amount: '',
+        spent_date: new Date().toISOString().slice(0, 10),
+        authorized_by: 'FinSec / Exco',
+        notes: ''
+      });
+      await fetchAllData();
+    }
+    setSavingExpense(false);
+  }
+
+  async function handleDeleteExpense(id, title) {
+    if (!window.confirm(`Delete expense record: "${title}"?`)) return;
+    const { error } = await supabase.from('expenses').delete().eq('id', id);
+    if (error) alert('Error deleting expense: ' + error.message);
+    else fetchAllData();
   }
 
   async function handleSaveSettings(e) {
@@ -506,6 +646,8 @@ export default function App() {
     }
   }
 
+  const isModalPrinting = showClearanceSlip || showAuditReport;
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans print:bg-white print:text-black">
       {/* Top Navbar */}
@@ -516,6 +658,7 @@ export default function App() {
               setIsAdminView(false);
               setSelectedStudent(null);
               setShowClearanceSlip(false);
+              setShowAuditReport(false);
               setVerifiedViaQr(false);
               window.history.replaceState({}, '', window.location.pathname);
             }}
@@ -539,6 +682,7 @@ export default function App() {
                   onClick={() => {
                     setIsAdminView(!isAdminView);
                     setShowClearanceSlip(false);
+                    setShowAuditReport(false);
                   }}
                   className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
                     isAdminView
@@ -570,8 +714,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Admin Master Ledger Print Header (Only visible when printing Admin Matrix) */}
-      {!showClearanceSlip && (
+      {/* Admin Master Ledger Print Header (Only when printing Matrix directly) */}
+      {!isModalPrinting && (
         <div className="hidden print:block p-6 border-b border-black mb-4">
           <h1 className="text-2xl font-bold uppercase">
             Official Class Financial Clearance Ledger (100L – 500L)
@@ -585,7 +729,7 @@ export default function App() {
       {/* Main Content Area */}
       <main
         className={`max-w-7xl mx-auto px-4 sm:px-6 py-8 print:p-2 ${
-          showClearanceSlip ? 'print:hidden' : ''
+          isModalPrinting ? 'print:hidden' : ''
         }`}
       >
         {loading ? (
@@ -595,54 +739,58 @@ export default function App() {
              FINSEC ADMIN DASHBOARD ("THE BACKDOOR")
              ========================================== */
           <div className="space-y-6">
-            {/* REVENUE ANALYTICS SUMMARY BAR */}
+            {/* REVENUE & TREASURY ANALYTICS SUMMARY BAR */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 print:hidden">
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
                 <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Total Cash Collected</span>
+                  <span>Total Cash Collected (Inflow)</span>
                   <TrendingUp className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div className="text-2xl font-extrabold text-emerald-400 mt-1">
                   ₦{analytics.grandCollected.toLocaleString()}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-1">
-                  Across all active levels & levies
+                  Expected: ₦{analytics.grandExpected.toLocaleString()} ({analytics.overallRate}%)
                 </div>
               </div>
 
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
                 <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Total Expected Revenue</span>
-                  <Wallet className="w-4 h-4 text-blue-400" />
+                  <span>Total Expenses (Outflow)</span>
+                  <TrendingDown className="w-4 h-4 text-rose-400" />
                 </div>
-                <div className="text-2xl font-extrabold text-white mt-1">
-                  ₦{analytics.grandExpected.toLocaleString()}
+                <div className="text-2xl font-extrabold text-rose-400 mt-1">
+                  ₦{analytics.totalExpenses.toLocaleString()}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-1">
-                  For {students.length} registered classmates
+                  Across {expenses.length} recorded expenditure(s)
+                </div>
+              </div>
+
+              <div className="bg-slate-900 border border-emerald-500/30 p-4 rounded-2xl">
+                <div className="flex items-center justify-between text-xs text-emerald-300 font-semibold">
+                  <span>Net Account Balance</span>
+                  <Wallet className="w-4 h-4 text-emerald-400" />
+                </div>
+                <div
+                  className={`text-2xl font-extrabold mt-1 ${
+                    analytics.netBalance >= 0 ? 'text-white' : 'text-rose-400'
+                  }`}
+                >
+                  ₦{analytics.netBalance.toLocaleString()}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Cash left in {settings.bank_name} account
                 </div>
               </div>
 
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
                 <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Total Unpaid / Outstanding</span>
+                  <span>Unpaid Dues (Receivables)</span>
                   <AlertCircle className="w-4 h-4 text-amber-400" />
                 </div>
                 <div className="text-2xl font-extrabold text-amber-400 mt-1">
                   ₦{analytics.grandOutstanding.toLocaleString()}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-1">
-                  Pending collection balance
-                </div>
-              </div>
-
-              <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Overall Collection Rate</span>
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                </div>
-                <div className="text-2xl font-extrabold text-white mt-1">
-                  {analytics.overallRate}%
                 </div>
                 <div className="w-full bg-slate-800 h-2 rounded-full mt-2 overflow-hidden">
                   <div
@@ -693,6 +841,17 @@ export default function App() {
                   100L–500L Payment Matrix
                 </button>
                 <button
+                  onClick={() => setAdminTab('expenses')}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition ${
+                    adminTab === 'expenses'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  <Receipt className="w-4 h-4" />
+                  Expenses & Outflow ({expenses.length})
+                </button>
+                <button
                   onClick={() => setAdminTab('fees')}
                   className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition ${
                     adminTab === 'fees'
@@ -716,13 +875,20 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setShowAuditReport(true)}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-xs font-bold flex items-center gap-1.5 border border-emerald-500/30 transition"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  Financial Audit Statement (PDF)
+                </button>
                 <button
                   onClick={handleExportCsv}
                   className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition"
                 >
                   <Download className="w-3.5 h-3.5 text-emerald-400" />
-                  Export CSV
+                  Export Dues CSV
                 </button>
                 <button
                   onClick={() => window.print()}
@@ -734,7 +900,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* TAB 1: PAYMENT MATRIX */}
+            {/* TAB 1: PAYMENT MATRIX WITH BATCH CLEAR BUTTONS */}
             {adminTab === 'matrix' && (
               <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden print:border-black print:bg-white">
                 <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:hidden">
@@ -774,7 +940,7 @@ export default function App() {
                           Classmate
                         </th>
                         {categories.map((cat) => (
-                          <th key={cat.id} className="py-3.5 px-3 text-center min-w-[115px]">
+                          <th key={cat.id} className="py-3 px-3 text-center min-w-[130px]">
                             <div className="font-bold text-slate-200 print:text-black">{cat.title}</div>
                             <div className="text-[10px] text-slate-400 print:text-gray-600">
                               {cat.session}
@@ -782,6 +948,17 @@ export default function App() {
                             <div className="text-[11px] text-emerald-400 font-semibold mt-0.5 print:text-black">
                               ₦{Number(cat.target_amount).toLocaleString()}
                             </div>
+
+                            <button
+                              type="button"
+                              disabled={batchLoadingId === cat.id}
+                              onClick={() => handleBatchMarkCleared(cat)}
+                              title={`Mark all students cleared for ${cat.title}`}
+                              className="mt-2 w-full py-1 px-2 rounded-md bg-emerald-500/10 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold flex items-center justify-center gap-1 transition print:hidden"
+                            >
+                              <CheckCheck className="w-3 h-3" />
+                              {batchLoadingId === cat.id ? 'Clearing...' : 'Mark All Paid'}
+                            </button>
                           </th>
                         ))}
                         <th className="py-3.5 px-4 text-right min-w-[110px]">Total Owing</th>
@@ -865,7 +1042,212 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB 2: SET SESSION PRICES, LEVIES & BANK SETTINGS */}
+            {/* TAB 2: EXPENSES & OUTFLOW TRACKER */}
+            {adminTab === 'expenses' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Log New Expense Form */}
+                <form
+                  onSubmit={handleAddExpense}
+                  className="bg-slate-900 rounded-2xl border border-slate-800 p-6 space-y-4 h-fit"
+                >
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <Receipt className="w-4 h-4 text-rose-400" />
+                    Record Class Expenditure
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Log any cash spent from the class account so your Net Account Balance stays 100% accurate.
+                  </p>
+
+                  <div>
+                    <label className="text-xs text-slate-300">Expense Title / Purpose</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Printing of Course Outlines / Lab Manuals"
+                      value={newExpense.title}
+                      onChange={(e) => setNewExpense({ ...newExpense, title: e.target.value })}
+                      className="w-full mt-1 px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-slate-300">Amount Spent (₦)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 12500"
+                        value={newExpense.amount}
+                        onChange={(e) => setNewExpense({ ...newExpense, amount: e.target.value })}
+                        className="w-full mt-1 px-3.5 py-2 bg-slate-950 border border-rose-500/40 rounded-xl text-sm text-white font-semibold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-300">Date Spent</label>
+                      <input
+                        type="date"
+                        value={newExpense.spent_date}
+                        onChange={(e) =>
+                          setNewExpense({ ...newExpense, spent_date: e.target.value })
+                        }
+                        className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-slate-300">Category</label>
+                      <select
+                        value={newExpense.category}
+                        onChange={(e) =>
+                          setNewExpense({ ...newExpense, category: e.target.value })
+                        }
+                        className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                      >
+                        <option value="Academic / Printing">Academic / Printing</option>
+                        <option value="Event / FYB">Event / FYB</option>
+                        <option value="Logistics & Transport">Logistics & Transport</option>
+                        <option value="Welfare / Refreshments">Welfare / Refreshments</option>
+                        <option value="Bank / Transfer Charges">Bank / Transfer Charges</option>
+                        <option value="General">General</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-300">Level / Session</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 400L (2025/2026)"
+                        value={newExpense.session}
+                        onChange={(e) =>
+                          setNewExpense({ ...newExpense, session: e.target.value })
+                        }
+                        className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-300">Authorized / Approved By</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Class Rep & FinSec"
+                      value={newExpense.authorized_by}
+                      onChange={(e) =>
+                        setNewExpense({ ...newExpense, authorized_by: e.target.value })
+                      }
+                      className="w-full mt-1 px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-300">Notes / Receipt Reference (Optional)</label>
+                    <textarea
+                      rows={2}
+                      placeholder="e.g. Paid via OPay to Vendor..."
+                      value={newExpense.notes}
+                      onChange={(e) => setNewExpense({ ...newExpense, notes: e.target.value })}
+                      className="w-full mt-1 px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={savingExpense}
+                    className="w-full py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 font-bold text-sm transition"
+                  >
+                    {savingExpense ? 'Recording Outflow...' : 'Record Expense'}
+                  </button>
+                </form>
+
+                {/* Expense History Table */}
+                <div className="lg:col-span-2 bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden flex flex-col">
+                  <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <h3 className="text-base font-bold text-white">
+                        Class Expenditure Ledger
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Total Outflow: <strong className="text-rose-400">₦{analytics.totalExpenses.toLocaleString()}</strong> • Net Treasury Balance: <strong className="text-emerald-400">₦{analytics.netBalance.toLocaleString()}</strong>
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => setShowAuditReport(true)}
+                        className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-1.5 transition"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        Print Income & Expenditure PDF
+                      </button>
+                      <button
+                        onClick={handleExportExpensesCsv}
+                        className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition"
+                      >
+                        <Download className="w-3.5 h-3.5 text-rose-400" />
+                        Expenses CSV
+                      </button>
+                    </div>
+                  </div>
+
+                  {expenses.length === 0 ? (
+                    <div className="p-12 text-center text-sm text-slate-400">
+                      No expenses recorded yet. Any expenditure you log on the left will appear here and automatically deduct from the Net Account Balance.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-950/60 text-xs uppercase text-slate-400">
+                            <th className="py-3 px-4">Date</th>
+                            <th className="py-3 px-4">Expense Details</th>
+                            <th className="py-3 px-3">Session</th>
+                            <th className="py-3 px-4 text-right">Amount</th>
+                            <th className="py-3 px-3 text-center">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/70">
+                          {expenses.map((exp) => (
+                            <tr key={exp.id} className="hover:bg-slate-800/30 transition">
+                              <td className="py-3 px-4 text-xs text-slate-400 font-mono whitespace-nowrap">
+                                {exp.spent_date}
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="font-semibold text-white">{exp.title}</div>
+                                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2 mt-0.5">
+                                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">
+                                    {exp.category}
+                                  </span>
+                                  <span>By: {exp.authorized_by}</span>
+                                  {exp.notes && <span className="italic">• "{exp.notes}"</span>}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 text-xs text-slate-300 whitespace-nowrap">
+                                {exp.session}
+                              </td>
+                              <td className="py-3 px-4 text-right font-bold text-rose-400 whitespace-nowrap">
+                                -₦{Number(exp.amount).toLocaleString()}
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                <button
+                                  onClick={() => handleDeleteExpense(exp.id, exp.title)}
+                                  title="Delete Expense"
+                                  className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: SET SESSION PRICES, LEVIES & BANK SETTINGS */}
             {adminTab === 'fees' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 bg-slate-900 rounded-2xl border border-slate-800 p-6 space-y-4">
@@ -977,7 +1359,7 @@ export default function App() {
                     </div>
                     <div>
                       <label className="text-xs text-slate-300">
-                        FinSec Name (Appears on Clearance Slip)
+                        FinSec Name (Appears on Clearance & Audit Slips)
                       </label>
                       <input
                         type="text"
@@ -1103,7 +1485,7 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB 3: UPLOAD MASTER CLASS LIST CSV */}
+            {/* TAB 4: UPLOAD MASTER CLASS LIST CSV */}
             {adminTab === 'students' && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 space-y-4">
@@ -1268,7 +1650,6 @@ export default function App() {
             {/* Selected Classmate Full Financial Card */}
             {selectedStudent && (
               <div className="space-y-6">
-                {/* Official QR Verification Banner (Appears when someone scans a slip QR code) */}
                 {verifiedViaQr && (
                   <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/40 flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3">
@@ -1318,7 +1699,6 @@ export default function App() {
                             </span>
                           </div>
 
-                          {/* Official Clearance Slip Button */}
                           <button
                             onClick={() => setShowClearanceSlip(true)}
                             className={`px-4 py-3 rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-lg ${
@@ -1451,13 +1831,282 @@ export default function App() {
         )}
       </main>
 
+      {/* =================================================================
+          MODAL 4: OFFICIAL INCOME & EXPENDITURE FINANCIAL STATEMENT (PDF)
+          ================================================================= */}
+      {showAuditReport && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto print:static print:bg-white print:p-0 print:block">
+          <div className="bg-white text-slate-900 rounded-2xl max-w-4xl w-full p-6 sm:p-10 shadow-2xl space-y-6 my-8 print:my-0 print:shadow-none print:rounded-none print:max-w-none">
+            {/* Top Action Bar (Hidden when printing) */}
+            <div className="flex items-center justify-between border-b border-slate-200 pb-4 print:hidden">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
+                <FileText className="w-4 h-4" />
+                Official Income & Expenditure Financial Statement
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => window.print()}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow"
+                >
+                  <Printer className="w-4 h-4" />
+                  Print / Save Audit PDF
+                </button>
+                <button
+                  onClick={() => setShowAuditReport(false)}
+                  className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Statement Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b-2 border-slate-900 pb-5">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-500">
+                  {settings.class_title || 'Departmental Class Executive Council'}
+                </p>
+                <h2 className="text-2xl font-extrabold uppercase tracking-tight text-slate-900 mt-0.5">
+                  Income & Expenditure Financial Statement
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  Office of the Financial Secretary • Treasury & Audit Report (100L – 500L)
+                </p>
+              </div>
+
+              <div className="text-left sm:text-right text-xs space-y-0.5 bg-slate-50 px-4 py-2.5 rounded-xl border border-slate-200">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                  Statement Date
+                </div>
+                <div className="font-bold text-slate-900">
+                  {new Date().toLocaleDateString('en-GB', {
+                    day: '2-digit',
+                    month: 'short',
+                    year: 'numeric'
+                  })}
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono">
+                  Ref: AUD-{new Date().getFullYear()}-{String(expenses.length).padStart(3, '0')}
+                </div>
+              </div>
+            </div>
+
+            {/* Executive Treasury Summary Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                <span className="text-emerald-800 font-semibold block">
+                  Total Gross Inflow (Collected)
+                </span>
+                <strong className="text-lg font-black text-emerald-900 mt-0.5 block">
+                  ₦{analytics.grandCollected.toLocaleString()}
+                </strong>
+                <span className="text-[10px] text-emerald-700">
+                  {analytics.overallRate}% of ₦{analytics.grandExpected.toLocaleString()} expected
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200">
+                <span className="text-rose-800 font-semibold block">
+                  Total Outflow (Expenditure)
+                </span>
+                <strong className="text-lg font-black text-rose-900 mt-0.5 block">
+                  ₦{analytics.totalExpenses.toLocaleString()}
+                </strong>
+                <span className="text-[10px] text-rose-700">
+                  Across {expenses.length} recorded voucher(s)
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-900 text-white border border-slate-900">
+                <span className="text-emerald-400 font-semibold block">
+                  Net Treasury Balance
+                </span>
+                <strong className="text-lg font-black text-white mt-0.5 block">
+                  ₦{analytics.netBalance.toLocaleString()}
+                </strong>
+                <span className="text-[10px] text-slate-300">
+                  Held in {settings.bank_name} ({settings.account_number})
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200">
+                <span className="text-amber-800 font-semibold block">
+                  Unpaid Dues (Receivables)
+                </span>
+                <strong className="text-lg font-black text-amber-900 mt-0.5 block">
+                  ₦{analytics.grandOutstanding.toLocaleString()}
+                </strong>
+                <span className="text-[10px] text-amber-700">
+                  Across {students.length} registered classmates
+                </span>
+              </div>
+            </div>
+
+            {/* SECTION A: INCOME / REVENUE BREAKDOWN */}
+            <div className="space-y-2">
+              <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-700">
+                Section A: Revenue / Inflow Breakdown by Level & Levy
+              </h3>
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase">
+                      <th className="py-2 px-3">Fee Category</th>
+                      <th className="py-2 px-3">Session</th>
+                      <th className="py-2 px-3 text-right">Unit Fee</th>
+                      <th className="py-2 px-3 text-center">Cleared / Partial</th>
+                      <th className="py-2 px-3 text-right">Expected</th>
+                      <th className="py-2 px-3 text-right">Cash Collected</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {analytics.perCategory
+                      .filter((c) => c.is_active || c.collected > 0)
+                      .map((cat) => (
+                        <tr key={cat.id}>
+                          <td className="py-2 px-3 font-bold text-slate-900">{cat.title}</td>
+                          <td className="py-2 px-3 text-slate-600">{cat.session}</td>
+                          <td className="py-2 px-3 text-right">
+                            ₦{Number(cat.target_amount).toLocaleString()}
+                          </td>
+                          <td className="py-2 px-3 text-center text-slate-600">
+                            {cat.clearedCount} cleared • {cat.partialCount} partial
+                          </td>
+                          <td className="py-2 px-3 text-right text-slate-600">
+                            ₦{cat.expected.toLocaleString()}
+                          </td>
+                          <td className="py-2 px-3 text-right font-bold text-emerald-700">
+                            ₦{cat.collected.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 border-t-2 border-slate-300 font-bold text-slate-900">
+                      <td colSpan={4} className="py-2.5 px-3 uppercase">
+                        Total Gross Revenue (Inflow)
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        ₦{analytics.grandExpected.toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-emerald-700">
+                        ₦{analytics.grandCollected.toLocaleString()}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            {/* SECTION B: ITEMIZED EXPENDITURE SCHEDULE */}
+            <div className="space-y-2">
+              <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-700">
+                Section B: Itemized Class Expenditure Schedule (Outflow)
+              </h3>
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase">
+                      <th className="py-2 px-3">Date</th>
+                      <th className="py-2 px-3">Description / Purpose</th>
+                      <th className="py-2 px-3">Category</th>
+                      <th className="py-2 px-3">Session</th>
+                      <th className="py-2 px-3">Authorized By</th>
+                      <th className="py-2 px-3 text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {expenses.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-4 text-center text-slate-500">
+                          No expenditures recorded for the period.
+                        </td>
+                      </tr>
+                    ) : (
+                      expenses.map((exp) => (
+                        <tr key={exp.id}>
+                          <td className="py-2 px-3 font-mono text-slate-600 whitespace-nowrap">
+                            {exp.spent_date}
+                          </td>
+                          <td className="py-2 px-3 font-semibold text-slate-900">
+                            {exp.title}
+                            {exp.notes && (
+                              <span className="block text-[10px] font-normal text-slate-500 italic">
+                                Note: {exp.notes}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-slate-600">{exp.category}</td>
+                          <td className="py-2 px-3 text-slate-600">{exp.session}</td>
+                          <td className="py-2 px-3 text-slate-600">{exp.authorized_by}</td>
+                          <td className="py-2 px-3 text-right font-bold text-rose-700 whitespace-nowrap">
+                            ₦{Number(exp.amount).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 border-t-2 border-slate-300 font-bold text-slate-900">
+                      <td colSpan={5} className="py-2.5 px-3 uppercase">
+                        Total Expenditure (Outflow)
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-rose-700">
+                        ₦{analytics.totalExpenses.toLocaleString()}
+                      </td>
+                    </tr>
+                    <tr className="bg-slate-900 text-white font-extrabold">
+                      <td colSpan={5} className="py-3 px-3 uppercase">
+                        Closing Net Balance in Class Account ({settings.bank_name} • {settings.account_number})
+                      </td>
+                      <td className="py-3 px-3 text-right text-emerald-400 text-sm">
+                        ₦{analytics.netBalance.toLocaleString()}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            {/* Dual Sign-off Footer */}
+            <div className="pt-8 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-6 items-end text-xs">
+              <div className="text-slate-500 space-y-1">
+                <p className="font-bold text-slate-800 uppercase text-[11px]">
+                  Certification of Accuracy
+                </p>
+                <p className="text-[11px] leading-relaxed">
+                  We certify that this statement accurately reflects the financial inflows, outflows, and net treasury balance of the class as recorded on the official portal.
+                </p>
+              </div>
+
+              <div className="text-center border-t border-slate-900 pt-2">
+                <div className="font-bold text-slate-900 uppercase">
+                  {settings.finsec_name || 'Financial Secretary'}
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Financial Secretary (Prepared By)
+                </div>
+              </div>
+
+              <div className="text-center border-t border-slate-900 pt-2">
+                <div className="font-bold text-slate-900 uppercase">
+                  Class Representative / President
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Counter-Signed & Verified By
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* =======================================================
           MODAL 3: STUDENT OFFICIAL E-CLEARANCE SLIP WITH QR CODE
           ======================================================= */}
       {showClearanceSlip && selectedStudent && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto print:static print:bg-white print:p-0 print:block">
           <div className="bg-white text-slate-900 rounded-2xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl space-y-6 my-8 print:my-0 print:shadow-none print:rounded-none print:max-w-none">
-            {/* Top Action Bar (Hidden when printing) */}
             <div className="flex items-center justify-between border-b border-slate-200 pb-4 print:hidden">
               <span className="text-xs font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
                 <Award className="w-4 h-4" />
@@ -1480,7 +2129,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Certificate Body */}
             {(() => {
               const summary = getStudentSummary(selectedStudent.id);
               const { qrImageUrl, refCode } = getVerificationData(selectedStudent);
@@ -1501,7 +2149,6 @@ export default function App() {
                       </p>
                     </div>
 
-                    {/* Official Stamp Badge */}
                     <div
                       className={`px-4 py-2 rounded-xl border-2 text-center ${
                         summary.isFullyCleared
@@ -1518,7 +2165,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Student Metadata Grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs">
                     <div>
                       <span className="text-slate-500 block">Student Name</span>
@@ -1546,7 +2192,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Itemized Payment Table */}
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
@@ -1610,9 +2255,7 @@ export default function App() {
                     </table>
                   </div>
 
-                  {/* QR Code Verification + FinSec Sign-off Footer */}
                   <div className="pt-6 border-t border-slate-200 flex flex-col sm:flex-row items-center sm:items-end justify-between gap-6 text-xs">
-                    {/* Scannable QR Code Block */}
                     <div className="flex items-center gap-4">
                       <div className="p-1.5 border-2 border-slate-900 rounded-xl bg-white shrink-0">
                         <img
@@ -1634,7 +2277,6 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* FinSec Signature Block */}
                     <div className="text-center sm:text-right min-w-[200px]">
                       <div className="border-b border-slate-900 pb-1 mb-1 font-serif italic text-base text-slate-800">
                         {settings.finsec_name || 'Financial Secretary'}
@@ -1759,7 +2401,7 @@ export default function App() {
             </div>
 
             <p className="text-xs text-slate-400">
-              Sign in with your Supabase Admin credentials to edit session dues, levies, and student payment records.
+              Sign in with your Supabase Admin credentials to edit session dues, levies, expenses, and student payment records.
             </p>
 
             {authError && (
